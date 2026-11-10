@@ -1,4 +1,5 @@
-/* uring.c: the kernel side of app.goose's event loop.
+/* uring.h: the kernel side of app.goose's event loop, included by c_headers so the native
+ * compiler can inline transport helpers into their Goose callers.
  *
  * This file decides nothing. app.goose runs the loop, keeps the connection table and decides
  * what to queue and what each completion means; here are only the things Goose cannot do
@@ -13,7 +14,8 @@
  *     responses while a send is in flight and the rare request that arrives in pieces.
  *
  * Goose only ever sees copies, so no Goose memory is shared with the kernel. */
-#define _GNU_SOURCE
+#ifndef GOOSE_SERVER_URING_H
+#define GOOSE_SERVER_URING_H
 #include <arpa/inet.h>
 #include <errno.h>
 #include <liburing.h>
@@ -31,12 +33,10 @@
 #include <unistd.h>
 #include "goose.h"
 
-typedef struct { const uint8_t *data; int64_t len; } bytes_t;
+typedef sl_u8 bytes_t;
 
 /* One completion as Goose reads it (app.goose's struct Cqe). */
-#pragma pack(push, 1)
-typedef struct { uint64_t ud; int32_t res; uint32_t flags; } cqe_t;
-#pragma pack(pop)
+typedef Cqe_g cqe_t;
 
 #define MAX_RINGS 16
 #define RX_COUNT 16384 /* receive buffers per ring (a power of two): a burst after a long pass must not run a ring dry */
@@ -80,7 +80,7 @@ static box_t *box_alloc(uint32_t cap) {
 }
 
 /* A new, empty box. */
-int32_t box_new(void) {
+static inline gs_i32 box_new(void) {
   if (nfree) {
     int32_t h = box_free[--nfree];
     if (!boxes[h]) boxes[h] = box_alloc(BOX_FIRST);
@@ -101,7 +101,7 @@ int32_t box_new(void) {
  * back to the allocator (its number is reused later), so a burst does not pin memory for good. */
 #define BOX_SPARE 8192
 
-void box_drop(int32_t h) {
+static inline void box_drop(int32_t h) {
   if (nfree >= BOX_SPARE || boxes[h]->cap > BOX_KEEP) {
     free(boxes[h]);
     boxes[h] = NULL;
@@ -109,7 +109,7 @@ void box_drop(int32_t h) {
   box_free[nfree++] = h;
 }
 
-int64_t box_live(void) { return nbox - nfree; }
+static inline gs_i64 box_live(void) { return nbox - nfree; }
 
 static inline uint8_t *box_room(int32_t h, uint64_t n) {
   box_t *x = boxes[h];
@@ -127,25 +127,25 @@ static inline uint8_t *box_room(int32_t h, uint64_t n) {
   return p;
 }
 
-void box_put(int32_t h, bytes_t a) {
+static inline void box_put(int32_t h, bytes_t a) {
   if (a.len > 0) memcpy(box_room(h, (uint64_t)a.len), a.data, (size_t)a.len);
 }
 
 /* Two pieces at once: a response's head and body. */
-void box_put2(int32_t h, bytes_t a, bytes_t b) {
+static inline void box_put2(int32_t h, bytes_t a, bytes_t b) {
   uint8_t *p = box_room(h, (uint64_t)(a.len + b.len));
   memcpy(p, a.data, (size_t)a.len);
   memcpy(p + a.len, b.data, (size_t)b.len);
 }
 
-int64_t box_len(int32_t h) { return boxes[h]->len; }
+static inline gs_i64 box_len(int32_t h) { return boxes[h]->len; }
 
-void box_cut(int32_t h, int64_t len) {
+static inline void box_cut(int32_t h, int64_t len) {
   if (len >= 0 && len < boxes[h]->len) boxes[h]->len = (uint32_t)len;
 }
 
 /* Appends the box's bytes to a Goose buffer. */
-void box_read(int32_t h, gs_rref out) { gs_bld_append(out, boxes[h]->b, boxes[h]->len); }
+static inline void box_read(int32_t h, gs_rref out) { gs_bld_append(out, boxes[h]->b, boxes[h]->len); }
 
 /* ---- rings ---- */
 
@@ -171,7 +171,7 @@ static int add_rx(ring_t *r) {
 }
 
 /* A new ring with `slots` direct descriptors: its index, or a negative errno. */
-int32_t ring_add(int64_t slots) {
+static inline gs_i32 ring_add(int64_t slots) {
   if (nrings == MAX_RINGS) return -EMFILE;
   ring_t *r = calloc(1, sizeof *r);
   if (!r) return -ENOMEM;
@@ -211,7 +211,7 @@ static struct io_uring_sqe *sqe(ring_t *r) {
 }
 
 /* One accept on listener `li`, into a free slot of the ring's table. */
-void op_accept(int32_t ri, int32_t li, uint64_t ud) {
+static inline void op_accept(int32_t ri, int32_t li, uint64_t ud) {
   struct io_uring_sqe *s = sqe(rings[ri]);
   if (!s) return;
   io_uring_prep_accept_direct(s, lfd[li], NULL, NULL, 0, IORING_FILE_INDEX_ALLOC);
@@ -219,7 +219,7 @@ void op_accept(int32_t ri, int32_t li, uint64_t ud) {
 }
 
 /* A multishot receive on a slot, into the ring's provided buffers. */
-void op_recv(int32_t ri, int32_t slot, uint64_t ud) {
+static inline void op_recv(int32_t ri, int32_t slot, uint64_t ud) {
   struct io_uring_sqe *s = sqe(rings[ri]);
   if (!s) return;
   io_uring_prep_recv_multishot(s, slot, NULL, 0, 0);
@@ -229,7 +229,7 @@ void op_recv(int32_t ri, int32_t slot, uint64_t ud) {
 }
 
 /* Sends box h from byte `from` on. The box must not change until the send completes. */
-void op_send(int32_t ri, int32_t slot, int32_t h, int64_t from, uint64_t ud) {
+static inline void op_send(int32_t ri, int32_t slot, int32_t h, int64_t from, uint64_t ud) {
   struct io_uring_sqe *s = sqe(rings[ri]);
   if (!s) return;
   io_uring_prep_send(s, slot, boxes[h]->b + from, boxes[h]->len - (size_t)from, MSG_NOSIGNAL);
@@ -238,7 +238,7 @@ void op_send(int32_t ri, int32_t slot, int32_t h, int64_t from, uint64_t ud) {
 }
 
 /* Shuts the socket down (ending its multishot receive), then frees the slot. */
-void op_close(int32_t ri, int32_t slot, uint64_t ud_shut, uint64_t ud_close) {
+static inline void op_close(int32_t ri, int32_t slot, uint64_t ud_shut, uint64_t ud_close) {
   ring_t *r = rings[ri];
   if (io_uring_sq_space_left(&r->q) < 2) io_uring_submit(&r->q); /* keep the pair together */
   struct io_uring_sqe *a = sqe(r), *b;
@@ -253,7 +253,7 @@ void op_close(int32_t ri, int32_t slot, uint64_t ud_shut, uint64_t ud_close) {
 
 /* Submits the ring's queue and runs its completions; with want > 0 waits for that many or
  * `ns` nanoseconds, whichever comes first. */
-void ring_enter(int32_t ri, int32_t want, int64_t ns) {
+static inline void ring_enter(int32_t ri, int32_t want, int64_t ns) {
   ring_t *r = rings[ri];
   int rc;
   if (want > 0) {
@@ -268,15 +268,15 @@ void ring_enter(int32_t ri, int32_t want, int64_t ns) {
 }
 
 /* Appends every completion the ring has to `out` (a Goose Cqe[>..]) and consumes them. */
-int64_t ring_reap(int32_t ri, gs_rref out) {
+static inline gs_i64 ring_reap(int32_t ri, gs_rref out) {
   ring_t *r = rings[ri];
   struct io_uring_cqe *c;
   unsigned head, n = 0;
   io_uring_for_each_cqe(&r->q, head, c) {
     cqe_t *o = (cqe_t *)out.stk->top;
-    o->ud = c->user_data;
-    o->res = c->res;
-    o->flags = c->flags;
+    o->ud_g = c->user_data;
+    o->res_g = c->res;
+    o->flags_g = c->flags;
     out.stk->top += sizeof(cqe_t);
     out.hdr->len++;
     n++;
@@ -291,22 +291,22 @@ static inline void rx_back(ring_t *r, int32_t bid) {
 }
 
 /* A received message: copied to a Goose buffer, or to a box, and its buffer handed back. */
-void rx_take(int32_t ri, int32_t bid, int32_t len, gs_rref out) {
+static inline void rx_take(int32_t ri, int32_t bid, int32_t len, gs_rref out) {
   ring_t *r = rings[ri];
   gs_bld_append(out, r->rxmem + (size_t)bid * RX_SIZE, len);
   rx_back(r, bid);
 }
 
-void rx_to_box(int32_t ri, int32_t bid, int32_t len, int32_t h) {
+static inline void rx_to_box(int32_t ri, int32_t bid, int32_t len, int32_t h) {
   ring_t *r = rings[ri];
   memcpy(box_room(h, (uint64_t)len), r->rxmem + (size_t)bid * RX_SIZE, (size_t)len);
   rx_back(r, bid);
 }
 
-void rx_drop(int32_t ri, int32_t bid) { rx_back(rings[ri], bid); }
+static inline void rx_drop(int32_t ri, int32_t bid) { rx_back(rings[ri], bid); }
 
 /* Makes the buffers handed back visible to the kernel. */
-void rx_publish(void) {
+static inline void rx_publish(void) {
   for (int i = 0; i < nrings; i++) {
     ring_t *r = rings[i];
     if (r->rx_back) {
@@ -319,7 +319,7 @@ void rx_publish(void) {
 /* ---- startup ---- */
 
 /* `n` listening sockets sharing HOST:PORT (SO_REUSEPORT); 0 or a negative errno. */
-int32_t listen_on(bytes_t host, int64_t port, int32_t n) {
+static inline gs_i32 listen_on(bytes_t host, int64_t port, int32_t n) {
   char h[64];
   struct in_addr ip;
   if (host.len <= 0 || host.len >= (int64_t)sizeof h || n > 16) return -EINVAL;
@@ -342,7 +342,7 @@ int32_t listen_on(bytes_t host, int64_t port, int32_t n) {
 
 /* Raises the soft descriptor limit to the hard one and returns it: a ring's table of direct
  * descriptors may be that large. GOOSE_SLOTS (test only) asks for smaller tables. */
-int64_t slot_limit(void) {
+static inline gs_i64 slot_limit(void) {
   struct rlimit rl;
   getrlimit(RLIMIT_NOFILE, &rl);
   rl.rlim_cur = rl.rlim_max;
@@ -357,7 +357,7 @@ int64_t slot_limit(void) {
 /* Locks the executable's own code and read-only data in RAM (best effort). With no swap,
  * reclaim near the memory wall evicts file-backed pages first, and the loop must never wait
  * on a major fault for its own code. The binary is static: about 2 MB. */
-int64_t lock_code(void) {
+static inline gs_i64 lock_code(void) {
   char exe[4096], line[4096 + 256];
   ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
   FILE *f = n > 0 ? fopen("/proc/self/maps", "r") : NULL;
@@ -377,3 +377,4 @@ int64_t lock_code(void) {
   fclose(f);
   return locked;
 }
+#endif

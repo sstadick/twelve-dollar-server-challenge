@@ -7,13 +7,14 @@
 // character count, the decoding of SQLite's record format, the feed and post read plans over
 // SQLite's B-tree cursors, and every response byte.
 //
-// C does only what Goose cannot: uring.c talks to the kernel (rings, queued operations,
+// C does only what Goose cannot: uring.h talks to the kernel (rings, queued operations,
 // completions, and the bytes the kernel reads and writes while an operation is in flight), and
 // sqlite.c is SQLite (cursor moves, row copies, the two INSERTs, the checkpoint thread).
 import std;
+import simd_bytes from "github.com/sstadick/goose-simd@bef8b31dfa4f0c87a8d0180c1e7fa6cbb1e435e6";
 
 // ---------------------------------------------------------------------------------------------
-// C: the kernel (uring.c)
+// C: the kernel (uring.h, included through app.build)
 
 struct Cqe { ud: u64, res: i32, flags: u32 }
 
@@ -809,42 +810,44 @@ fn push_int(out: u8[>..]&, v: i64) {
     out.append(d[20 - n..]);
 }
 
-// JSON string contents: `"`, `\` and control characters escaped, everything else (UTF-8
-// included) as is. Eight bytes are tested at a time; runs with nothing to escape are copied
-// in one piece.
-let LO7: u64 = 0x0101010101010101;
-let HI1: u64 = 0x8080808080808080;
-
-fn needs_escape8(w: u64) -> u64 {
-    let q = w ^ 0x2222222222222222;
-    let s = w ^ 0x5c5c5c5c5c5c5c5c;
-    let zq = (q - LO7) & ~q;
-    let zs = (s - LO7) & ~s;
-    let lt = (w - 0x2020202020202020) & ~w;
-    return (zq | zs | lt) & HI1;
-}
-
-fn load8(s: const u8[:], i: i64) -> u64 {
-    let w = s[i..i + 8]; // one check, and the eight loads below become one
-    return w[0] | (w[1] as u64 << 8) | (w[2] as u64 << 16) | (w[3] as u64 << 24) |
-        (w[4] as u64 << 32) | (w[5] as u64 << 40) | (w[6] as u64 << 48) | (w[7] as u64 << 56);
+// The upper three bits distinguish controls from all other bytes, including UTF-8.
+// Goose's lane loop becomes a vector operation in native builds.
+inline fn json_mask<V>(s: const u8[:]) -> u32 {
+    let v = simd_bytes::load<V>(s);
+    var upper = v;
+    for &c in upper.lanes { c &= 0xe0; }
+    return upper.eq(0).bit_or(v.eq('"')).bit_or(v.eq('\\')).to_bits();
 }
 
 // The length of s's prefix that needs no escaping.
-fn plain_prefix(s: const u8[:]) -> i64 {
-    var i = 0;
-    let n = s.len;
-    while i + 8 <= n {
-        let m = needs_escape8(load8(s, i));
-        if m != 0 { return i + ctz(m) / 8; }
-        i += 8;
+inline fn plain_prefix(s: const u8[:]) -> i64 {
+    if s.len == 0 { return 0; }
+    if s[0] < 32 || s[0] == '"' || s[0] == '\\' { return 0; }
+    if s.len >= 32 {
+        var i = 0;
+        while i <= s.len - 32 {
+            let mask = json_mask<simd_bytes::U8x32>(s[i..]);
+            if mask != 0 { return i + ctz(mask); }
+            i += 32;
+        }
+        // An overlapping final load stays inside the slice; its prefix was checked above.
+        if i < s.len {
+            let start = s.len - 32;
+            let mask = json_mask<simd_bytes::U8x32>(s[start..]);
+            if mask != 0 { return start + ctz(mask); }
+        }
+    } else if s.len >= 16 {
+        let first = json_mask<simd_bytes::U8x16>(s);
+        if first != 0 { return ctz(first); }
+        if s.len > 16 {
+            let start = s.len - 16;
+            let last = json_mask<simd_bytes::U8x16>(s[start..]);
+            if last != 0 { return start + ctz(last); }
+        }
+    } else {
+        for c, i in s { if c < 32 || c == '"' || c == '\\' { return i; } }
     }
-    while i < n {
-        let c = s[i];
-        if c < 0x20 || c == '"' || c == '\\' { return i; }
-        i++;
-    }
-    return n;
+    return s.len;
 }
 
 let HEX = "0123456789abcdef";
