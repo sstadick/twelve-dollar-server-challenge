@@ -5,11 +5,11 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 if [[ $(id -u) == 0 ]]; then
   apt-get update
-  apt-get install -y --no-install-recommends build-essential cmake ninja-build curl ca-certificates unzip python3
+  apt-get install -y --no-install-recommends build-essential cmake ninja-build git curl ca-certificates unzip python3
 fi
-commit=369c7a2cfca74bfcee60379727e8bdfd83da2d75
-sha=83dd689acb314930bb8f38a911d9bb9fec00b8dad0d3191eabe1c837d2f33f12
-prefix=${GOOSE_PREFIX:-/opt/goose-369c7a2c}
+commit=74c641c5ac6d762e57e3177678fe9dea414d042a
+sha=7539a77952248a40712874a9e28d2105b47ecb017c391f3cdaf4543648aa047d
+prefix=${GOOSE_PREFIX:-/opt/goose-74c641c5}
 if [[ ! -x $prefix/build/goose ]]; then
   src=$(mktemp)
   trap 'rm -f "$src"' EXIT
